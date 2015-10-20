@@ -5,8 +5,8 @@ Simple, lightweight, dependable CLI for ZooKeeper
 
 **zookeepercli** is a non-interactive command line client for [ZooKeeper](http://zookeeper.apache.org/). It provides with:
 
- * Basic CRUD-like operations: `create`, `set`, `delete`, `exists`, `get`, `ls` (aka `children`).
- * Extended operations: `lsr` (ls recursive), `creater` (create recursively)
+ * Basic CRUD-like operations: `create`, `set`, `delete` (aka `rm`), `exists`, `get`, `ls` (aka `children`).
+ * Extended operations: `lsr` (ls recursive), `creater` (create recursively), `deleter` (aka `rmr`, delete recursively)
  * Well formatted and controlled output: supporting either `txt` or `json` format
  * Single, no-dependencies binary file, based on a native Go ZooKeeper library 
    by [github.com/samuel/go-zookeeper](http://github.com/samuel/go-zookeeper) ([LICENSE](https://github.com/outbrain/zookeepercli/blob/master/go-zookeeper-LICENSE))
@@ -24,7 +24,10 @@ Otherwise the source code is freely available; you will need `git` installed as 
 
     $ zookeepercli --help
     Usage of zookeepercli:
-      -c="": command (exists|get|ls|lsr|create|creater|set|delete)
+      -acls="31": optional, csv list [1|,2|,4|,8|,16|,31]
+      -auth_pwd="": optional, digest scheme, pwd
+      -auth_usr="": optional, digest scheme, user
+      -c="": command (exists|get|ls|lsr|create|creater|set|delete|rm|deleter|rmr|getacl|setacl)
       -debug=false: debug mode (very verbose)
       -force=false: force operation
       -format="txt": output format (txt|json)
@@ -104,13 +107,50 @@ Otherwise the source code is freely available; you will need `git` installed as 
     child
     child/key1
     child/key2
+
+    # set value with read and write acl using digest authentication
+    $ zookeepercli --servers 192.168.59.103 --auth_usr "someuser" --auth_pwd "pass" --acls 1,2 -c create /secret4 value4
     
+    # get value using digest authentication
+    $ zookeepercli --servers 192.168.59.103 --auth_usr "someuser" --auth_pwd "pass" -c get /secret4
+
+    # create a value with custom acls
+    $ zookeepercli --servers 192.168.59.103 -c create /secret5 value5 world:anyone:rw,digest:someuser:hashedpw:crdwa
+
+    # view the current acl on a path
+    $ zookeepercli --servers srv-1,srv-2,srv-3 -c create /demo_acl "some value"
+    $ zookeepercli --servers srv-1,srv-2,srv-3 -c getacl /demo_acl
+    world:anyone:cdrwa
+
+    # set an acl with world and digest authentication
+    $ zookeepercli --servers srv-1,srv-2,srv-3 -c setacl /demo_acl "world:anyone:rw,digest:someuser:hashedpw:crdwa"
+    $ zookeepercli --servers srv-1,srv-2,srv-3 -c getacl /demo_acl
+    world:anyone:rw
+    digest:someuser:hashedpw:cdrwa
+
+    # set an acl with world and digest authentication creating the node if it doesn't exist
+    $ zookeepercli --servers srv-1,srv-2,srv-3 -force -c setacl /demo_acl_create "world:anyone:rw,digest:someuser:hashedpw:crdwa"
 
 The tool was built in order to allow with shell scripting seamless integration with ZooKeeper. 
 There is another, official command line tool for ZooKeeper that the author found inadequate 
 in terms of output format and output control, as well as large footprint. 
 **zookeepercli** overcomes those limitations and provides with quick, well formatted output as well as
 enhanced functionality. 
+
+### Docker
+
+You can also build and run **zookeepercli** in a Docker container. To build the image:
+
+    $ docker build -t zookeepercli .
+
+Now, you can run **zookeepercli** from a container. Examples:
+
+    $ docker run --rm -it zookeepercli --servers $ZK_SERVERS -c create /docker_demo "test value"
+    $ docker run --rm -it zookeepercli --servers $ZK_SERVERS -c get /docker_demo
+    test value
+    $ docker run --rm -it zookeepercli --servers $ZK_SERVERS -c ls /
+    docker_demo
+    zookeeper
 
 ### License
 

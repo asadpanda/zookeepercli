@@ -18,21 +18,30 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"github.com/outbrain/golib/log"
 	"github.com/outbrain/zookeepercli/output"
 	"github.com/outbrain/zookeepercli/zk"
+	"io/ioutil"
+	"math/rand"
+	"os"
 	"strings"
+	"time"
 )
 
 // main is the application's entry point.
 func main() {
 	servers := flag.String("servers", "", "srv1[:port1][,srv2[:port2]...]")
-	command := flag.String("c", "", "command, required (exists|get|ls|lsr|create|creater|set|delete)")
+	command := flag.String("c", "", "command, required (exists|get|ls|lsr|create|creater|set|delete|rm|deleter|rmr|getacl|setacl)")
 	force := flag.Bool("force", false, "force operation")
 	format := flag.String("format", "txt", "output format (txt|json)")
+	omitNewline := flag.Bool("n", false, "omit trailing newline with get in txt format")
 	verbose := flag.Bool("verbose", false, "verbose")
 	debug := flag.Bool("debug", false, "debug mode (very verbose)")
 	stack := flag.Bool("stack", false, "add stack trace upon error")
+	authUser := flag.String("auth_usr", "", "optional, digest scheme, user")
+	authPwd := flag.String("auth_pwd", "", "optional, digest scheme, pwd")
+	acls := flag.String("acls", "31", "optional, csv list [1|,2|,4|,8|,16|,31]")
 	flag.Parse()
 
 	log.SetLevel(log.ERROR)
@@ -46,6 +55,19 @@ func main() {
 		log.SetPrintStackTrace(*stack)
 	}
 
+	if *omitNewline && *format != "txt" {
+		log.Fatalf("-n only valid for -format=txt")
+	}
+	var out output.Printer
+	switch *format {
+	case "txt":
+		out = &output.TxtPrinter{*omitNewline}
+	case "json":
+		out = &output.JSONPrinter{}
+	default:
+		log.Fatalf("Unknown output type %q", *format)
+	}
+
 	log.Info("starting")
 
 	if *servers == "" {
@@ -57,18 +79,25 @@ func main() {
 	}
 
 	if len(*command) == 0 {
-		log.Fatal("Expected command (-c) (exists|get|ls|lsr|create|creater|set|delete)")
+		log.Fatal("Expected command (-c) (exists|get|ls|lsr|create|creater|set|delete|rm|deleter|rmr|getacl|setacl)")
 	}
 
 	if len(flag.Args()) < 1 {
 		log.Fatal("Expected path argument")
 	}
 	path := flag.Arg(0)
-	if strings.HasSuffix(path, "/") {
+	if *command == "ls" {
+	} else if strings.HasSuffix(path, "/") {
 		log.Fatal("Path must not end with '/'")
 	}
 
+	rand.Seed(time.Now().UnixNano())
 	zk.SetServers(serversArray)
+
+	if *authUser != "" && *authPwd != "" {
+		authExp := fmt.Sprint(*authUser, ":", *authPwd)
+		zk.SetAuth("digest", []byte(authExp))
+	}
 
 	if *command == "creater" {
 		*command = "create"
@@ -78,7 +107,7 @@ func main() {
 	case "exists":
 		{
 			if exists, err := zk.Exists(path); err == nil && exists {
-				output.PrintString([]byte("true"), *format)
+				out.PrintString([]byte("true"))
 			} else {
 				log.Fatale(err)
 			}
@@ -86,7 +115,15 @@ func main() {
 	case "get":
 		{
 			if result, err := zk.Get(path); err == nil {
-				output.PrintString(result, *format)
+				out.PrintString(result)
+			} else {
+				log.Fatale(err)
+			}
+		}
+	case "getacl":
+		{
+			if result, err := zk.GetACL(path); err == nil {
+				out.PrintStringArray(result)
 			} else {
 				log.Fatale(err)
 			}
@@ -94,7 +131,7 @@ func main() {
 	case "ls":
 		{
 			if result, err := zk.Children(path); err == nil {
-				output.PrintStringArray(result, *format)
+				out.PrintStringArray(result)
 			} else {
 				log.Fatale(err)
 			}
@@ -102,36 +139,90 @@ func main() {
 	case "lsr":
 		{
 			if result, err := zk.ChildrenRecursive(path); err == nil {
-				output.PrintStringArray(result, *format)
+				out.PrintStringArray(result)
 			} else {
 				log.Fatale(err)
 			}
 		}
 	case "create":
 		{
+			var aclstr string
+
 			if len(flag.Args()) < 2 {
 				log.Fatal("Expected data argument")
 			}
-			if result, err := zk.Create(path, []byte(flag.Arg(1)), *force); err == nil {
-				log.Infof("Created %+v", result)
+
+			if len(flag.Args()) >= 3 {
+				aclstr = flag.Arg(2)
+			}
+
+			if *authUser != "" && *authPwd != "" {
+				perms, err := zk.BuildACL("digest", *authUser, *authPwd, *acls)
+				if err != nil {
+					log.Fatale(err)
+				}
+				if result, err := zk.CreateWithACL(path, []byte(flag.Arg(1)), *force, perms); err == nil {
+					log.Infof("Created %+v", result)
+				} else {
+					log.Fatale(err)
+				}
 			} else {
-				log.Fatale(err)
+				if result, err := zk.Create(path, []byte(flag.Arg(1)), aclstr, *force); err == nil {
+					log.Infof("Created %+v", result)
+				} else {
+					log.Fatale(err)
+				}
 			}
 		}
 	case "set":
 		{
-			if len(flag.Args()) < 2 {
-				log.Fatal("Expected data argument")
+			var info []byte
+			if len(flag.Args()) > 1 {
+				info = []byte(flag.Arg(1))
+			} else {
+				var err error
+				info, err = ioutil.ReadAll(os.Stdin)
+				if err != nil {
+					log.Fatale(err)
+				}
 			}
-			if result, err := zk.Set(path, []byte(flag.Arg(1))); err == nil {
+			if result, err := zk.Set(path, info); err == nil {
 				log.Infof("Set %+v", result)
 			} else {
 				log.Fatale(err)
 			}
 		}
-	case "delete":
+	case "setacl":
+		{
+			var aclstr string
+			if len(flag.Args()) > 1 {
+				aclstr = flag.Arg(1)
+			} else {
+				var err error
+				data, err := ioutil.ReadAll(os.Stdin)
+				aclstr = string(data)
+				if err != nil {
+					log.Fatale(err)
+				}
+			}
+			if result, err := zk.SetACL(path, aclstr, *force); err == nil {
+				log.Infof("Set %+v", result)
+			} else {
+				log.Fatale(err)
+			}
+		}
+	case "delete", "rm":
 		{
 			if err := zk.Delete(path); err != nil {
+				log.Fatale(err)
+			}
+		}
+	case "deleter", "rmr":
+		{
+			if !(*force) {
+				log.Fatal("deleter (recursive) command requires --force for safety measure")
+			}
+			if err := zk.DeleteRecursive(path); err != nil {
 				log.Fatale(err)
 			}
 		}
